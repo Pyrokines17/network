@@ -1,0 +1,10 @@
+beautifulsoup4==4.12.3
+google==3.0.0
+numpy==2.1.2
+protobuf==3.20.1
+pygame==2.6.1
+pygame-ce==2.5.1
+pygame_gui==0.6.12
+python-i18n==0.3.9
+soupsieve==2.6
+unique-names-generator==1.0.2
