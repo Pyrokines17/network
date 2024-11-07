@@ -19,7 +19,6 @@ class Binder:
         self.mulMessages = LifoQueue()
         self.lock = threading.Lock()
         self.messages = Queue()
-        self.cv = threading.Condition()
 
         self.other_thread = threading.Thread(target=self.listen_other)
         self.multicast_thread = threading.Thread(target=self.listen_multicast)
@@ -49,7 +48,7 @@ class Binder:
         self.other_socket.sendto(message, address)
 
     def listen_multicast(self):
-        while self.running:
+        while self.runningMul:
             try:
                 data, address = self.multicast_socket.recvfrom(1024)
                 gameMsg = GameMessage()
@@ -61,6 +60,8 @@ class Binder:
                 pass
             except socket.error as e:
                 print(f'Multicast error: {e}')
+
+        self.multicast_socket.close()
 
     def listen_other(self):
         while self.running:
@@ -76,15 +77,21 @@ class Binder:
             except socket.error as e:
                 print(f'Other error: {e}')
 
+        self.other_socket.close()
+
     def start(self):
         self.running = True
+        self.runningMul = True
         self.other_thread.start()
         self.multicast_thread.start()
                 
     def stop(self):
-        self.running = False
-        self.other_socket.close()
-        self.multicast_socket.close()
+        with self.lock:
+            self.running = False
+    
+    def stopMul(self):
+        with self.lock:
+            self.runningMul = False
 
     def process_multicast(self):
         with self.lock:

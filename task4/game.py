@@ -29,12 +29,9 @@ class Game:
         pg.init()
         pg.display.set_caption('Snakes') 
 
-        if role == 'MASTER':
-            self.annoncer = threading.Thread(target=self.announce, args=(self.model,self.binder,))
-            self.requester = threading.Thread(target=self.handing_requests, args=(self.model, self.binder))
+        self.annoncer = threading.Thread(target=self.announce, args=(self.model,self.binder,))
+        self.requester = threading.Thread(target=self.handing_requests, args=(self.model, self.binder))
         
-        self.last_move_time = pg.time.get_ticks()
-
         self.screen = pg.display.set_mode(self.model.window)
         self.view.screen = self.screen
         self.clock = pg.time.Clock()
@@ -55,7 +52,17 @@ class Game:
             self.annoncer.start()
             self.requester.start()
 
-        self.role = role
+        self.binder.stopMul()
+
+        self.depId = None
+        self.last_ping_time = {}
+        self.lock = threading.Lock()
+        self.role = self.model.get_role()
+
+        self.last_master_hb = pg.time.get_ticks()
+        self.last_move_time = pg.time.get_ticks()
+        self.last_send_time = pg.time.get_ticks()
+        self.last_state_time = pg.time.get_ticks()
 
     def add_bots(self):
         for i in range(5):
@@ -75,28 +82,34 @@ class Game:
             if not binder.messages.empty():
                 with binder.lock:
                     mes = binder.messages.get()
-
-                strMes = str(mes[0])
                 
-                if 'join' in strMes:
-                    if 'NORMAL' in strMes:
+                if mes[0].HasField('join'):
+                    plType = mes[0].join.requested_role
+                    if plType == NodeRole.NORMAL:
                         snake = Snake(model, BLUE)
-                        rid = model.reg_snake(snake, mes[0].join.player_name, 'NORMAL', mes[1])
-                        mes1 = model.get_ackMsg(1)
-                        binder.send_other(mes1.SerializeToString(), mes[1])
-                    elif 'VIEWER' in strMes:
+                        if snake.fall == True:
+                            mes1 = model.get_errorMsg('No free space for new snake', mes[0].msg_seq)
+                            binder.send_other(mes1.SerializeToString(), mes[1])
+                        else:
+                            rid = model.reg_snake(snake, mes[0].join.player_name, 'NORMAL', mes[1])
+                            mes1 = model.get_ackMsg(rid, mes[0].msg_seq)
+                            binder.send_other(mes1.SerializeToString(), mes[1])
+                    elif plType == NodeRole.VIEWER:
                         rid = model.reg_viewer(mes[0].join.player_name, 'VIEWER', mes[1])
-                        mes1 = model.get_ackMsg(rid)
+                        mes1 = model.get_ackMsg(rid, mes[0].msg_seq)
                         binder.send_other(mes1.SerializeToString(), mes[1])
-                elif 'steer' in strMes:
+                elif mes[0].HasField('steer'):
                     direct = self.model.STDtoMY(mes[0].steer.direction)
-                    name = self.model.rewAddrs[mes[1]]
                     with self.model.lock:
-                        newSnake = self.model.rewSnakes[name]
+                        id = self.model.rewAddrs[mes[1]]
+                        newSnake = self.model.rewSnakes[id]
                         _ = self.model.snakes.pop(newSnake)
                         newSnake.direction = direct
-                        self.model.snakes[newSnake] = name
-                        self.model.rewSnakes[name] = newSnake
+                        self.model.snakes[newSnake] = id
+                        self.model.rewSnakes[id] = newSnake
+                elif mes[0].HasField('ping'):
+                    with self.lock:
+                        self.last_ping_time[mes[0].sender_id] = pg.time.get_ticks()
 
     def handle_events(self):
         control = self.model.get_control()
@@ -105,27 +118,36 @@ class Game:
             if event.type == pg.QUIT:
                 self.running = False
             elif event.type == pg.KEYDOWN:
+                myRole = self.model.get_role()
                 if event.key == pg.K_ESCAPE:
                     self.running = False
                 elif event.key == control[0] and self.snake != None:
                     self.snake.change_direction((0, -1))
-                elif event.key == control[0] and self.model.role == 'NORMAL':
+                elif event.key == control[0] and myRole in ['NORMAL', 'DEPUTY']:
                     self.sendDir((0, -1))
+                    self.last_send_time = pg.time.get_ticks()
                 elif event.key == control[1] and self.snake != None:
                     self.snake.change_direction((0, 1))
-                elif event.key == control[1] and self.model.role == 'NORMAL':
+                elif event.key == control[1] and myRole in ['NORMAL', 'DEPUTY']:
                     self.sendDir((0, 1))
+                    self.last_send_time = pg.time.get_ticks()
                 elif event.key == control[2] and self.snake != None:
                     self.snake.change_direction((-1, 0))
-                elif event.key == control[2] and self.model.role == 'NORMAL':
+                elif event.key == control[2] and myRole in ['NORMAL', 'DEPUTY']:
                     self.sendDir((-1, 0))
+                    self.last_send_time = pg.time.get_ticks()
                 elif event.key == control[3] and self.snake != None:
                     self.snake.change_direction((1, 0))
-                elif event.key == control[3] and self.model.role == 'NORMAL':
+                elif event.key == control[3] and myRole in ['NORMAL', 'DEPUTY']:
                     self.sendDir((1, 0))
+                    self.last_send_time = pg.time.get_ticks()
 
     def sendDir(self, direct):
         mes = self.model.get_steerMsg(direct)
+        self.binder.send_other(mes.SerializeToString(), self.model.conn)
+
+    def sendPing(self):
+        mes = self.model.get_pingMsg()
         self.binder.send_other(mes.SerializeToString(), self.model.conn)
 
     def check_food(self):
@@ -154,40 +176,53 @@ class Game:
 
     def sendStates(self):
         mes = self.model.get_stateMsg(self.model, self.foods)
-
-        addrsWithNames = self.model.get_addrs()
-        addrs = addrsWithNames.values()
-
-        for addr in addrs:
-            self.binder.send_other(mes.SerializeToString(), addr)
+        
+        with self.model.lock:
+            addrsWithNames = self.model.addrs
+            addrs = addrsWithNames.values()
+            for addr in addrs:
+                self.binder.send_other(mes.SerializeToString(), addr)
 
     def run(self):
         state_delay = self.model.get_state_delay()
 
+        #pg.mixer.music.load('wasd.mp3')
+        #pg.mixer.music.play(-1)
+
         while self.running:
             if self.role != 'MASTER':
                 if not self.binder.messages.empty():
+                    self.last_master_hb = pg.time.get_ticks()
                     with self.binder.lock:
                         tmp = self.binder.messages.get()
-                    self.model.changeModel(tmp, self)
+                    if tmp[0].HasField('state'):
+                        self.model.changeModel(tmp, self)
+                    elif tmp[0].HasField('role_change'):
+                        if tmp[0].role_change.receiver_role == NodeRole.DEPUTY:
+                            self.model.changeRole(tmp[0])
+                            self.role = self.model.get_role()
+                        else:
+                            with self.model.lock:
+                                self.model.lastState = tmp[0].state.state.state_order
+                                self.model.mid = tmp[0].sender_id
+                                self.model.conn = tmp[1]
 
             self.handle_events()
 
-            snakes = self.model.get_snakes()
-            current_time = pg.time.get_ticks()
-
             if self.role == 'MASTER':
+                current_time = pg.time.get_ticks()
+
                 if current_time - self.last_move_time > state_delay:
+                    self.last_move_time = current_time
+                    snakes = self.model.get_snakes()
+                    snakeKeys = snakes.keys()
+
                     for snake in snakes:
                         snake.move()
                         
-                    self.last_move_time = current_time
-
                     self.check_food()
 
                     tempDel = []
-
-                    snakeKeys = snakes.keys()
 
                     for snake in snakeKeys:
                         if snake.check_collision(snakeKeys):
@@ -197,18 +232,71 @@ class Game:
                         body = self.model.remove_snake(snake)
                         self.gen_food(body)
                         
+                current_time = pg.time.get_ticks()
+
+                if current_time - self.last_state_time > state_delay / 10:
+                    self.last_state_time = current_time
                     self.sendStates()
                 
+                current_time = pg.time.get_ticks()
+
+                if self.depId != None:
+                    with self.lock:
+                        diff = current_time - self.last_ping_time[self.depId]
+                    if diff > state_delay * 0.8:
+                        with self.model.lock:
+                            self.model.roles[self.depId] = 'NORMAL'
+                        self.depId = None
+                else:
+                    with self.lock:
+                        for key in self.last_ping_time.keys():
+                            diff = current_time - self.last_ping_time[key]
+                            if diff < state_delay * 0.8:
+                                with self.model.lock:
+                                    if self.model.roles[key] != 'NORMAL':
+                                        continue
+                                    self.model.roles[key] = 'DEPUTY'
+                                    addr = self.model.addrs[key]
+                                mes = self.model.get_changeMsg('DEPUTY', key)
+                                self.binder.send_other(mes.SerializeToString(), addr)
+                                self.depId = key
+                                break   
+                
                 self.add_food()
+
+            if self.role == 'DEPUTY':
+                current_time = pg.time.get_ticks()
+
+                if current_time - self.last_master_hb > state_delay * 0.8:
+                    with self.lock:
+                        self.role = 'MASTER'
+                    with self.model.lock:
+                        self.model.role = 'MASTER'
+                        self.model.roles[self.model.mid] = 'NORMAL'
+                        self.model.roles[self.model.myId] = 'MASTER'
+                        self.snake = self.model.rewSnakes[self.model.myId]
+                    self.annoncer.start()
+                    self.requester.start()
+                    with self.model.lock:
+                        addrs = self.model.addrs
+                        keys = addrs.keys()
+                        roles = self.model.roles
+                        for key in keys:
+                            if key != self.model.myId:
+                                mes = self.model.get_changeMsg(roles[key], key)
+                                self.binder.send_other(mes.SerializeToString(), addrs[key])
+                    
+            if self.role != 'MASTER':
+                current_time = pg.time.get_ticks()
+
+                if current_time - self.last_send_time > state_delay / 10:
+                    self.last_send_time = current_time
+                    self.sendPing()
 
             self.view.draw_window(self.foods)
 
             pg.display.flip()
             self.clock.tick(self.model.fps)
-
-            if self.role == 'MASTER':
-                if self.model.get_snakes_size() == 0:
-                    self.running = False
         
         pg.quit()
         self.binder.stop()

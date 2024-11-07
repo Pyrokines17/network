@@ -286,7 +286,7 @@ class View:
         for player in players:
             r = player.role
 
-            if r == NodeRole.MASTER or r == NodeRole.DEPUTY:
+            if r == NodeRole.MASTER:
                 return player.name
         
         return 'UNKNOWN'
@@ -455,6 +455,7 @@ class View:
         snakes = self.model.get_snakes()
         all_food = self.model.get_all_food()
         font = pg.font.SysFont(None, font_size) 
+        myName = self.model.get_myName()
 
         self.screen.fill(BLACK, (game_place[0], 0, 
                                  window[0]-game_place[0], window[1]))
@@ -475,6 +476,8 @@ class View:
 
         for snake in snakes:
             name, score = self.model.get_name_score(snake)
+            if name == myName:
+                name = '(i) ' + name
             score_text = font.render(f'{name}: {score}', True, WHITE)
             self.screen.blit(score_text, (game_place[0]+20, shift[1]+140+30*counter))
             counter += 1

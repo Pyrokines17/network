@@ -5,7 +5,6 @@ from network import *
 from view import *
 
 import game_objects as go
-import random as rnd
 import pygame as pg
 
 import threading
@@ -18,6 +17,8 @@ class Model:
         self.stateId = 0
         self.myId = 0
 
+        self.viewId = []
+
         if role == 'MASTER':
             settings = view.get_settings()
             self.end = False
@@ -26,6 +27,7 @@ class Model:
                 settings, self.conn = view.get_other_settings(binder)
             except ValueError as e:
                 self.end = True
+                binder.stopMul()
                 binder.stop()
                 return
             
@@ -35,6 +37,7 @@ class Model:
                 self.waitAnswear(binder)
             except Exception as e:
                 self.end = True
+                binder.stopMul()
                 binder.stop()
                 print(e)
                 return
@@ -49,6 +52,7 @@ class Model:
             'DEPUTY': NodeRole.DEPUTY,
             'VIEWER': NodeRole.VIEWER
         }
+        
         self.firRole = {
             NodeRole.NORMAL : 'NORMAL',
             NodeRole.MASTER : 'MASTER',
@@ -103,10 +107,11 @@ class Model:
             if not binder.messages.empty():
                 with binder.lock:
                     answear = binder.messages.get()
-                if 'error' in str(answear[0]):
+                if answear[0].HasField('error'):
                     raise Exception(answear[0].error.error_message)
-                else:
+                elif answear[0].HasField('ack'):
                     self.myId = answear[0].receiver_id
+                    self.mid = answear[0].sender_id
                     break
 
     def MYtoSTD(self, direct):
@@ -139,10 +144,11 @@ class Model:
         self.names = {}
         self.scores = {}
         self.roles = {}
-        self.ids = {}
             
     def changeModel(self, mes, game):
+        self.idCounter = 0
         self.emptyModel()
+        self.viewId = []
         game.foods = []
 
         gameState = mes[0].state.state
@@ -161,15 +167,16 @@ class Model:
             role = self.firRole[player.role]
 
             with self.lock:
-                self.roles[name] = role
-                self.ids[name] = player.id
+                self.idCounter += 1
+                self.roles[player.id] = role
+                if role == 'VIEWER':
+                    self.viewId.append(player.id)
                 self.names[player.id] = name
-                self.scores[name] = player.score
+                self.scores[player.id] = player.score
+                self.addrs[player.id] = (player.ip_address, player.port)
+                self.rewAddrs[(player.ip_address, player.port)] = player.id
 
         for snake in snakes:
-            with self.lock:
-                name = self.names[snake.player_id]
-
             if snake.player_id == self.myId:
                 color = (128, 0, 128)
             else:
@@ -178,10 +185,24 @@ class Model:
             initSnake = go.Snake(self, color, True, snake.points, snake.head_direction)
 
             with self.lock:
-                self.snakes[initSnake] = name
+                self.snakes[initSnake] = snake.player_id
+                self.rewSnakes[snake.player_id] = initSnake
 
         for food in foods:
             game.foods.append(go.Food(self, (food.x*ts, food.y*ts)))
+
+    def changeRole(self, mes):
+        role = self.firRole[mes.role_change.receiver_role]
+        with self.lock:
+            self.role = role
+
+    def get_myId(self):
+        with self.lock:
+            return self.myId
+        
+    def get_myName(self):
+        with self.lock:
+            return self.name
 
     def get_game_name(self):
         with self.lock:
@@ -190,11 +211,11 @@ class Model:
     def get_host(self):
         roles = self.get_roles()
         
-        for name in roles:
-            if roles[name] == 'MASTER':
-                return name
-            if roles[name] == 'DEPUTY':
-                return name
+        for id in roles:
+            if roles[id] == 'MASTER':
+                return self.names[id]
+            if roles[id] == 'DEPUTY':
+                return self.names[id]
         
         return 'UNKNOWN'
 
@@ -205,19 +226,23 @@ class Model:
         gamePlayers = GamePlayers()
         gameAnn = GameAnnouncement()
 
-        ids = self.get_ids()
+        addrs = self.get_addrs()
+        names = self.get_names()
         roles = self.get_roles()
         scores = self.get_scores()
         snakes = self.get_snakes()
+        iters = snakes.keys()
 
-        for snake in snakes:
+        for snake in iters:
             gamePlayer = gamePlayers.players.add()
-            name = snakes[snake]
-            strRole = roles[name]
-            gamePlayer.name = name
-            gamePlayer.id = ids[name]
-            gamePlayer.score = scores[name]
+            id = snakes[snake]
+            strRole = roles[id]
+            gamePlayer.name = names[id]
+            gamePlayer.id = id
+            gamePlayer.ip_address = addrs[id][0]
+            gamePlayer.port = addrs[id][1]
             gamePlayer.role = self.secRole[strRole]
+            gamePlayer.score = scores[id]
 
         gameAnn.config.CopyFrom(self.gameCon)
         gameAnn.game_name = self.gameName
@@ -225,6 +250,7 @@ class Model:
 
         annMsg.CopyFrom(gameAnn)
         gameMsg.msg_seq = self.counter
+        gameMsg.sender_id = self.myId
         self.counter += 1
 
         return gameMsg
@@ -244,19 +270,19 @@ class Model:
 
         return gameMsg
     
-    def get_ackMsg(self, rid):
+    def get_ackMsg(self, rid, seq):
         gameMsg = GameMessage()
-        gameMsg.msg_seq = self.counter
-        self.counter += 1
-
-        gameMsg.sender_id = self.mid
+        gameMsg.ack.SetInParent()
+        gameMsg.msg_seq = seq
+        gameMsg.sender_id = self.myId
         gameMsg.receiver_id = rid
-
         return gameMsg
     
-    def get_errorMsg(self, text):
+    def get_errorMsg(self, text, seq):
         gameMsg = GameMessage()
         gameMsg.error.error_message = text
+        gameMsg.msg_seq = seq
+        gameMsg.sender_id = self.myId
         return gameMsg
     
     def get_stateMsg(self, model, foods):
@@ -273,16 +299,19 @@ class Model:
         scores = model.get_scores()
         ts = model.get_tile_size()
         roles = model.get_roles()
-        ids = model.get_ids()
+        names = model.get_names()
+        addrs = model.get_addrs()
 
         for snake in iters:
-            name = snakes[snake]
-            strRole = roles[name]
+            id = snakes[snake]
+            strRole = roles[id]
 
             tmp = gameState.snakes.add()
-            tmp.player_id = ids[name]
+
+            tmp.player_id = id
             tmp.state = GameState.Snake.SnakeState.ALIVE
             tmp.head_direction = self.MYtoSTD(snake.direction)
+
             gamePlayer = gamePlayers.players.add()
             coords = snake.body
 
@@ -296,10 +325,21 @@ class Model:
                 tmpCoord.x = int((coords[i][0]-coords[i-1][0])/ts)
                 tmpCoord.y = int((coords[i][1]-coords[i-1][1])/ts)
 
-            gamePlayer.name = name
-            gamePlayer.id = ids[name]
-            gamePlayer.score = scores[name]
+            gamePlayer.id = id
+            gamePlayer.name = names[id]
+            gamePlayer.ip_address = addrs[id][0]
+            gamePlayer.port = addrs[id][1]
+            gamePlayer.score = scores[id]
             gamePlayer.role = self.secRole[strRole]
+
+        for id in self.viewId:
+            gamePlayer = gamePlayers.players.add()
+            gamePlayer.id = id
+            gamePlayer.name = names[id]
+            gamePlayer.ip_address = addrs[id][0]
+            gamePlayer.port = addrs[id][1]
+            gamePlayer.score = scores[id]
+            gamePlayer.role = self.secRole[roles[id]]
 
         for food in foods:
             tmp = gameState.foods.add()
@@ -309,6 +349,7 @@ class Model:
         gameState.players.CopyFrom(gamePlayers)
         gameMsg.state.state.CopyFrom(gameState)
         gameMsg.msg_seq = self.counter
+        gameMsg.sender_id = self.myId
         self.counter += 1
 
         return gameMsg
@@ -317,8 +358,33 @@ class Model:
         gameMsg = GameMessage()
         gameMsg.steer.direction = self.MYtoSTD(direct)
         gameMsg.msg_seq = self.counter
+        gameMsg.sender_id = self.myId
+        gameMsg.receiver_id = self.mid
         self.counter += 1
         return gameMsg
+    
+    def get_pingMsg(self):
+        gameMsg = GameMessage()
+        gameMsg.ping.SetInParent()
+        gameMsg.msg_seq = self.counter
+        gameMsg.sender_id = self.myId
+        gameMsg.receiver_id = self.mid
+        self.counter += 1
+        return gameMsg
+    
+    def get_changeMsg(self, role, id):
+        gameMsg = GameMessage()
+        gameMsg.role_change.sender_role = self.secRole[self.role]
+        gameMsg.role_change.receiver_role = self.secRole[role]
+        gameMsg.msg_seq = self.counter
+        gameMsg.sender_id = self.myId
+        gameMsg.receiver_id = id
+        self.counter += 1
+        return gameMsg
+    
+    def get_names(self):
+        with self.lock:
+            return self.names
     
     def get_control(self):
         with self.lock:
@@ -358,57 +424,44 @@ class Model:
         
     def reg_viewer(self, name, role, addr):
         with self.lock:
-            self.ids[name] = self.idCounter
-            self.roles[name] = role
-            self.addrs[name] = addr
+            self.rewAddrs[addr] = self.idCounter
+            self.addrs[self.idCounter] = addr
+            self.names[self.idCounter] = name
+            self.roles[self.idCounter] = role
+            self.scores[self.idCounter] = 0
+            self.viewId.append(self.idCounter)
             self.idCounter += 1
         
-        return self.ids[name]
+        return self.idCounter-1
         
     def reg_snake(self, snake, name, role, addr):
         with self.lock:
             if role == 'MASTER':
                 self.mid = self.idCounter
 
-            self.ids[name] = self.idCounter
-            self.rewSnakes[name] = snake
-            self.snakes[snake] = name
-            self.rewAddrs[addr] = name
-            self.addrs[name] = addr
-            self.roles[name] = role
-            self.scores[name] = 0
+            self.rewSnakes[self.idCounter] = snake
+            self.rewAddrs[addr] = self.idCounter
+            self.snakes[snake] = self.idCounter
+            self.addrs[self.idCounter] = addr
+            self.names[self.idCounter] = name
+            self.scores[self.idCounter] = 0
+            self.roles[self.idCounter] = role
+
             self.idCounter += 1
             self.all_food += 1
 
-        return self.ids[name]
+        return self.idCounter-1
 
     def remove_snake(self, snake):
         body = snake.body
-        dep_flag = False
-
-        roles = self.get_roles()
-        snakes = self.get_snakes()
-
-        del_role = roles[snakes[snake]]
-
-        if del_role == 'MASTER' or del_role == 'DEPUTY':
-            dep_flag = True
 
         with self.lock:
-            name = self.snakes[snake]
+            id = self.snakes[snake]
+            del self.rewSnakes[id]
             del self.snakes[snake]
-            del self.roles[name]
-            del self.scores[name]
-            del self.ids[name]
+            del self.scores[id]
+            self.roles[id] = 'VIEWER'
             self.all_food -= 1
-
-        new_snakes = self.get_snakes()
-
-        if dep_flag:
-            new_dep = rnd.choice(list(new_snakes.values()))
-
-            with self.lock:
-                self.roles[new_dep] = 'DEPUTY'
 
         return body
 
@@ -419,14 +472,14 @@ class Model:
     def get_snakes(self):
         with self.lock:
             return self.snakes
-    
-    def get_ids(self):
-        with self.lock:
-            return self.ids
         
     def get_roles(self):
         with self.lock:
             return self.roles
+        
+    def get_role(self):
+        with self.lock:
+            return self.role
         
     def get_scores(self):
         with self.lock:
@@ -434,13 +487,14 @@ class Model:
         
     def update_score(self, snake):
         with self.lock:
-            name = self.snakes[snake]
-            self.scores[name] += 1
+            id = self.snakes[snake]
+            self.scores[id] += 1
         
     def get_name_score(self, snake):
         with self.lock:
-            name = self.snakes[snake]
-            return name, self.scores[name]
+            id = self.snakes[snake]
+            name = self.names[id]
+            return name, self.scores[id]
         
     def get_all_food(self):
         with self.lock:
