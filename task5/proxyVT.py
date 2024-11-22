@@ -95,16 +95,44 @@ class Socks5Server:
         dest_host, dest_port = None, None
 
         try:
-            ver, nmethods, methods = sock.recv(1), sock.recv(1), sock.recv(1)
+            ver = sock.recv(1)
+
+            if ver != VER:
+                typer.secho(f"Invalid version: {ver}", fg=typer.colors.RED)
+                sock.sendall(VER + b'\xFF')
+                sock.close()
+                return None, None
+            
+            nmethods = sock.recv(1)
+            numMethods = ord(nmethods)
+            methods = []
+
+            for _ in range(numMethods):
+                methods.append(sock.recv(1))
+
+            if METHOD not in methods:
+                typer.secho("Method not supported", fg=typer.colors.RED)
+                sock.sendall(VER + b'\xFF')
+                sock.close()
+                return None, None
+            
             sock.sendall(VER + METHOD)
-            ver, cmd, rsv, atyp = sock.recv(1), sock.recv(1), sock.recv(1), sock.recv(1)
+            ver = sock.recv(1)
+
+            if ver != VER:
+                typer.secho(f"Invalid version: {ver}", fg=typer.colors.RED)
+                sock.sendall(VER + SOCKS_FAIL + b'\x00' + ATYP_IPV4 + b'\x00' * 6)
+                sock.close()
+                return None, None
+            
+            cmd, rsv, atyp = sock.recv(1), sock.recv(1), sock.recv(1)
             
             dst_addr = None
             dst_port = None
 
             if atyp == ATYP_IPV4:
                 dst_addr, dst_port = sock.recv(4), sock.recv(2)
-                dst_addr = '.'.join([str(chr_to_int(x)) for x in dst_addr])
+                dst_addr = '.'.join([str(ord(x)) for x in dst_addr])
             elif atyp == ATYP_DOMAIN:
                 addr_len = ord(sock.recv(1))
                 dst_addr, dst_port = sock.recv(addr_len), sock.recv(2)
