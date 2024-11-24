@@ -6,7 +6,7 @@ RADIUS = 1000
 
 async def get_locations(query):
     url = 'https://graphhopper.com/api/1/geocode'
-    myParams = {"q": query, "key": "45cae03b-4504-49ad-af0b-0b018fbc9b82", "limit": LIMIT}
+    myParams = {"q": query, "key": <KEY0>, "limit": LIMIT}
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -19,7 +19,7 @@ async def get_locations(query):
         
 async def get_weather(lat, lon):
     url = 'https://api.openweathermap.org/data/2.5/weather'
-    myParams = {"lat": lat, "lon": lon, "appid": "4059cf463d79ea85b27e740de3ba59d8"}
+    myParams = {"lat": lat, "lon": lon, "appid": <KEY1>}
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -32,8 +32,7 @@ async def get_weather(lat, lon):
         
 async def get_places(lat, lon):
     url = 'https://api.opentripmap.com/0.1/en/places/radius'
-    apiKey = "5ae2e3f221c38a28845f05b6301dc5477ec5c8b935bd2cd6baf0dba0"
-    myParams = {"lat": lat, "lon": lon, "apikey": apiKey, "radius": RADIUS}
+    myParams = {"lat": lat, "lon": lon, "apikey": <KEY2>, "radius": RADIUS}
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -46,11 +45,10 @@ async def get_places(lat, lon):
         
 async def get_place_description(xid):
     url = f'https://api.opentripmap.com/0.1/en/places/xid/{xid}'
-    apiKey = "5ae2e3f221c38a28845f05b6301dc5477ec5c8b935bd2cd6baf0dba0"
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params={"apikey": apiKey}) as response:
+            async with session.get(url, params={"apikey": <KEY3>}) as response:
                 if response.status != 200:
                     raise Exception(f"HTTP error in get place description: {response.status}")
                 return await response.json()
