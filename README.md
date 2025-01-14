@@ -1,1 +1,1 @@
-# Repository for networks
+# Repository for network labs
